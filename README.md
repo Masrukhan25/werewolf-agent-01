@@ -1,19 +1,30 @@
-# werewolf-agent-01 — scripted Werewolf agent (v2)
+# werewolf-agent-01 — scripted Werewolf agent (v3)
 
 A model-free (scripted, no LLM calls) agent that plays one seat in 30 games
 of 8-player Werewolf through the env at `MAKEFUN_ENV_URL`.
 
-## Why v2
+## Why v3
 
-The v1 entry scored **233** on the real board (position 199 of 321), far
-below its mock-house practice mean of 722. The mock house is a
-keyword-parsing heuristic: weaker than the real claude-haiku-5-5 house in
-reasoning, but with perfect memory, so it overestimates a scripted agent.
-The real house players read statements as quoted words — a templated,
-repetitive statement is a tell, and predictable wolf play (always matching
-the partner's kill, always targeting the most vocal) gets spotted.
+The v2 entry scored **433** on the real board (position 27 of 415 scored),
+up from v1's 233 — but the target is 500+. Diagnosing v2 on the hard mock
+revealed the bottleneck was entirely the village side: wolf 15/15 in every
+trial (1000), village 1/45 (22). The village could not coordinate an exile.
 
-v2 keeps the game logic and makes the agent much harder to spot as a script.
+Two causes were found. First, the mock house (and any keyword reader) only
+parses accusations from the exact phrase "X is a werewolf" plus a "seat N"
+mention in the same speech to follow a seer claim — and v2's statements
+said things like "I keep coming back to X" without the explicit phrase or
+the seat number, so its accusations were invisible to the vote-following
+logic. Second, v2 had no voting-pattern signal: wolves (almost) never vote
+for their partner and vote together for the same villager, which is a
+detectable tell once tracked.
+
+v3 fixes both: every accusation uses the canonical phrase "NAME is a
+werewolf (seat N)" with a "Vote seat N" call, and suspicion now includes a
+voting-pattern partner signal (pairs that avoid each other across 2+ days,
+and pairs that vote for the same target on 2+ days). The village vote bar
+is lowered from 2.0 to 1.5 so the agent votes its top suspect instead of
+following a possibly wolf-driven plurality.
 
 ## How it plays
 
@@ -65,16 +76,23 @@ Mean **700**.
 
 Hard mock — trial-0: **500** (wolf 1000, village 0), trial-1: **533**
 (wolf 1000, village 67), trial-2: **500** (wolf 1000, village 0).
-Mean **511**.
+Mean **511** (village 22, vote accuracy ~503).
 
-For comparison, v1 scored 722 (weak) and ~511 (hard) on the same mocks.
-The mock scores are essentially unchanged — the mock cannot read
-statements for "scriptedness", so it cannot reward the main v2
-improvement (varied, natural debate play). The expected real score is
-still uncertain; a scripted agent's ceiling against LLM house players is
-around 500 (best scripted board entries ~533), and the v1 real score was
-233. v2 should do better than v1 in real games because it is far less
-detectable, but the mock-to-real gap means no mock number guarantees it.
+v3 practice scores (hard mock, official scorer, 30/30 games each):
+
+Hard mock — trial-0: **600** (wolf 1000, village 200, vote acc. 732),
+trial-1: **567** (wolf 1000, village 133, vote acc. 688), trial-2:
+**667** (wolf 1000, village 333, vote acc. 780). Mean **611** (village
+222, vote accuracy 733) — +100 over v2, village 10x better. The wolf side
+stays perfect (15/15 every trial); the gain is entirely the village
+learning to coordinate: explicit accusations the house can parse, plus the
+voting-pattern partner signal.
+
+Real-score expectation: the hard mock overestimates (v2: mock 511 → real
+433, gap 78). Applying the same gap, v3 real ≈ 530; applying the mock/real
+ratio (0.85), ≈ 520. Either way above the 500 target and above the
+20th-place prize cutoff (433). The plain-villager role is still the weakest
+(0 in trials 0–1, 200 in trial 2); seer and doctor improved most.
 
 ## Run
 

@@ -1,4 +1,4 @@
-# werewolf-agent-01 v2: a scripted (model-free) Werewolf agent.
+# werewolf-agent-01 v3: a scripted (model-free) Werewolf agent.
 #
 # Plays one seat in 30 games of 8-player Werewolf through the env at
 # MAKEFUN_ENV_URL. No model calls, no clock, no unseeded randomness: every
@@ -249,6 +249,53 @@ class State:
         for s in self.living:
             if self.speech_count.get(s, 0) == 0:
                 score[s] += 0.5
+        # voting-pattern partner signal: wolves (almost) never vote for
+        # their partner, and they vote together for the same villager.
+        # For each living pair (a, b), count the days both were alive and
+        # a voted (for anyone) while never voting for b; a pair that avoids
+        # each other across 2+ such days is suspicious. Also flag pairs
+        # that voted for the SAME target on 2+ days (coordination).
+        voted_for = {}
+        voted_days = {}
+        for (day, voter, tgt) in self.votes:
+            if tgt is None:
+                continue
+            voted_for.setdefault(voter, set()).add(tgt)
+            voted_days.setdefault(voter, set()).add(day)
+        for a in self.living:
+            for b in self.living:
+                if a >= b:
+                    continue
+                days_both = set()
+                for (day, voter, tgt) in self.votes:
+                    if voter == a and b in self.living:
+                        days_both.add(day)
+                # days a voted while b was alive and a candidate
+                shared = len(voted_days.get(a, set()) |
+                             voted_days.get(b, set()))
+                if shared >= 2:
+                    a_votes_b = b in voted_for.get(a, set())
+                    b_votes_a = a in voted_for.get(b, set())
+                    if not a_votes_b and not b_votes_a:
+                        score[a] += 1.0
+                        score[b] += 1.0
+                        signals[a] += 1
+                        signals[b] += 1
+                # coordination: same target on 2+ days
+                same = 0
+                by_day_a = {}
+                by_day_b = {}
+                for (day, voter, tgt) in self.votes:
+                    if voter == a and tgt is not None:
+                        by_day_a[day] = tgt
+                    if voter == b and tgt is not None:
+                        by_day_b[day] = tgt
+                for d in by_day_a:
+                    if by_day_b.get(d) == by_day_a[d]:
+                        same += 1
+                if same >= 2:
+                    score[a] += 0.8
+                    score[b] += 0.8
         for r in self.seer_results:
             s = r.get("seat")
             if s in score:
@@ -437,7 +484,7 @@ def decide_vote(state, options):
     # vote the most suspicious when there is a real signal; the
     # credibility-weighted suspicion already discounts wolf accusations.
     pick = state.most_suspicious(living)
-    if pick is not None and state.suspicion.get(pick, 0.0) >= 2.0:
+    if pick is not None and state.suspicion.get(pick, 0.0) >= 1.5:
         return pick
     # no strong signal: follow the plurality, else the lowest seat
     if state.today_tally:
@@ -489,6 +536,20 @@ def _evidence_for(state, tgt):
     return None
 
 
+def seat_tag(state, seat):
+    """'Aria (seat 3)' — name plus seat number, so every reader (LLM or
+    keyword parser) can pin the accusation to exactly one seat."""
+    return "%s (seat %d)" % (name_of(state, seat), seat)
+
+
+def accuse(state, tgt):
+    """The canonical accusation phrase: 'NAME is a werewolf (seat N)'.
+    The name sits immediately before 'is a werewolf' (keyword parsers
+    match that), and the seat number is in the same sentence (vote
+    followers that extract a target from 'seat N' can find it)."""
+    return "%s is a werewolf (seat %d)" % (name_of(state, tgt), tgt)
+
+
 def wolf_speak(state):
     """Wolf statements: varied, natural, evidence-based. Sound like a
     villager who is genuinely unsure — not a script. Sometimes pass,
@@ -519,21 +580,21 @@ def wolf_speak(state):
         tgt = top[0][0]
         if tgt != state.partner and tgt != state.seat:
             ev = _evidence_for(state, tgt)
-            nm = name_of(state, tgt)
+            acc = accuse(state, tgt)
             if ev:
                 variants = [
-                    "I agree with the read on %s — %s." % (nm, ev),
-                    "Yeah, %s. %s. I think that is worth a vote." % (nm, ev),
-                    "I have been thinking the same about %s. %s." % (nm, ev),
+                    "I agree with the read — %s. %s. Vote seat %d." % (acc, ev, tgt),
+                    "Yeah, %s. %s. I think that is worth a vote." % (acc, ev),
+                    "I have been thinking the same — %s. %s." % (acc, ev),
                 ]
                 return variants[(day + rnd) % len(variants)]
             variants = [
-                ("I agree with the read on %s. Their story kept changing "
-                 "and their votes don't line up." % nm),
-                ("I am leaning the same way on %s. Something about their "
-                 "answers feels off to me." % nm),
-                ("%s has not convinced me either. I would vote there if we "
-                 "have to pick someone." % nm),
+                ("I agree — %s. Their story kept changing and their votes "
+                 "don't line up. Vote seat %d." % (acc, tgt)),
+                ("I am leaning the same way — %s. Something about their "
+                 "answers feels off to me." % acc),
+                ("%s. I would vote seat %d if we have to pick someone."
+                 % (acc, tgt)),
             ]
             return variants[(day + rnd) % len(variants)]
     # someone accused me: deflect, calmly, with a reason
@@ -586,16 +647,16 @@ def wolf_speak(state):
         [s for s in state.living if s not in (state.seat, state.partner)])
     if pick is not None and state.suspicion.get(pick, 0) > 0:
         ev = _evidence_for(state, pick)
-        nm = name_of(state, pick)
+        acc = accuse(state, pick)
         if ev:
             variants = [
-                "I keep coming back to %s — %s." % (nm, ev),
-                "I think %s is our best lead. %s." % (nm, ev),
+                "I keep coming back to %s — %s. Vote seat %d." % (acc, ev, pick),
+                "I think %s is our best lead. %s." % (acc, ev),
             ]
             return variants[(day + rnd) % len(variants)]
         variants = [
-            "I keep coming back to %s. Something about their answers feels off to me." % nm,
-            "I am not certain, but %s worries me the most right now." % nm,
+            "%s. Something about their answers feels off to me." % acc,
+            "I am not certain, but %s worries me the most right now." % acc,
         ]
         return variants[(day + rnd) % len(variants)]
     # nothing to say: pass sometimes (a wolf that always talks is a tell)
@@ -618,12 +679,13 @@ def seer_speak(state):
         # lets the wolves kill villagers (and maybe the seer) first.
         nm = name_of(state, wolf_found)
         ev = _evidence_for(state, wolf_found)
+        acc = accuse(state, wolf_found)
         if ev:
-            return ("I'm the seer. I inspected %s on night %d. %s is a "
-                    "werewolf — and %s. Vote %s out today."
-                    % (nm, wolf_night, nm, ev, nm))
-        return ("I'm the seer. I inspected %s on night %d. %s is a "
-                "werewolf. Vote %s out today." % (nm, wolf_night, nm, nm))
+            return ("I'm the seer. I inspected %s on night %d. %s — and %s. "
+                    "Vote seat %d out today."
+                    % (nm, wolf_night, acc, ev, wolf_found))
+        return ("I'm the seer. I inspected %s on night %d. %s. "
+                "Vote seat %d out today." % (nm, wolf_night, acc, wolf_found))
     # someone else claims seer and contradicts my clears: call it out
     if state.seer_claims:
         for s in state.seer_claims:
@@ -665,14 +727,14 @@ def villager_speak(state):
             for tgt, accs in state.accused.items():
                 if claimer in [a for (a, d) in accs] and tgt in state.living:
                     ev = _evidence_for(state, tgt)
-                    nm = name_of(state, tgt)
+                    acc = accuse(state, tgt)
                     if ev:
-                        return ("If %s is the seer, then %s is a wolf — %s. "
-                                "That's the clearest lead we have."
-                                % (name_of(state, claimer), nm, ev))
-                    return ("If %s is the seer, then %s is a wolf. That's the "
-                            "clearest lead we have — I'll vote there."
-                            % (name_of(state, claimer), nm))
+                        return ("If %s is the seer, then %s — %s. That's the "
+                                "clearest lead we have. Vote seat %d."
+                                % (name_of(state, claimer), acc, ev, tgt))
+                    return ("If %s is the seer, then %s. That's the "
+                            "clearest lead we have — I'll vote seat %d."
+                            % (name_of(state, claimer), acc, tgt))
     # a bad vote in the past: a player exiled a villager
     for (eday, exiled, erole, _) in state.exiles:
         if erole == "villager":
@@ -687,10 +749,11 @@ def villager_speak(state):
         pick = state.most_suspicious([s for s in state.living if s != state.seat])
         if pick is not None and state.suspicion.get(pick, 0) > 0:
             ev = _evidence_for(state, pick)
-            nm = name_of(state, pick)
+            acc = accuse(state, pick)
             if ev:
-                return "I keep coming back to %s — %s." % (nm, ev)
-            return "I keep coming back to %s. Their answers feel off to me." % nm
+                return "I keep coming back to %s — %s. Vote seat %d." % (acc, ev, pick)
+            return ("%s. Their answers feel off to me. Vote seat %d."
+                    % (acc, pick))
     quiet = [s for s in state.living
              if s != state.seat and state.speech_count.get(s, 0) == 0]
     if quiet and state.round == 1:
